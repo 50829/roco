@@ -52,8 +52,21 @@ Their entire chat history and the final plan are:
 """
 
 SORT_TASK_PLAN_PROMPT="""
-Think step-by-step and reason about the best strategy for each robot to achieve their goal or best help others. Carefully consider Environment Feedback and Scene Description.
-Decide which cubes and panels can be reached by each robot. At each round, plan **exactly** one ACTION per robot. 
+Reason about the Sort Cubes task step-by-step. Carefully consider [Scene description], [Structured Task State], [Legal Actions], [Recommended Plan], and [Environment Feedback].
+
+Important Sort-specific rules:
+- Object target panels are fixed. Do not swap object goals between robots.
+- Fixed goals: blue_square -> panel2, pink_polygon -> panel4, yellow_trapezoid -> panel6.
+- Each robot has a limited reach range; choose only actions listed in [Legal Actions].
+- If direct final placement is impossible, use a directed shared handoff panel.
+- Alice/Bob handoff uses panel3.
+- Bob/Chad handoff uses panel5.
+- A valid intermediate handoff is better than an invalid direct final placement.
+- Prefer [Recommended Plan] unless feedback says it failed.
+- To reduce collision risk, use WAIT for robots that do not need to move.
+
+At each round, output exactly one ACTION per robot and strictly follow [Action Output Instruction].
+Your final plan output is:
 """
 
 SORTING_ACTION_SPACE="""

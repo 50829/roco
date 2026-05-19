@@ -41,15 +41,19 @@ Their entire discussion and final plan are:
 
 
 def get_plan_prompt(env: MujocoSimEnv):
+    if hasattr(env, "central_plan_prompt"):
+        try:
+            task_prompt = env.central_plan_prompt()
+        except TypeError:
+            task_prompt = env.central_plan_prompt([])
+        if task_prompt:
+            return task_prompt
+
     return """
 Reason about the task step-by-step, and find the best strategy to coordinate the robots. Propose a plan of **exactly** one action per robot.
 Use [Environment Feedback] to improve your plan. Strictly follow [Action Output Instruction] to format and output the plan.
-Important:
-- Object target panels are fixed. Do not swap object goals between robots.
-- If an object cannot be placed directly on its final target because of reach limits, move it to a reachable shared handoff panel first, and use WAIT for robots that should not move.
-- A valid intermediate handoff is better than an invalid direct final placement.
-For Sort Cubes specifically, the fixed goals are: blue_square -> panel2, pink_polygon -> panel4, yellow_trapezoid -> panel6.
-Your reasoning and final plan output are:
+Output only the final EXECUTE block, with exactly one ACTION line for each robot.
+Your final plan output is:
     """
 
 
