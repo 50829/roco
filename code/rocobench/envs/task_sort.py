@@ -222,6 +222,174 @@ In the plan, at least one robot should be acting, you can't all WAIT.
     def get_action_prompt(self) -> str:
         return SORTING_ACTION_SPACE
 
+    def get_plan_state_prompt(self, obs: EnvState) -> str:
+        """Compact structured state used by the centralized planner."""
+        lines = ["[Structured Task State]"]
+        for cube_name, target_panel in self.cube_to_bin.items():
+            current_panel = self.get_cube_panel(obs, cube_name)
+            status = "done" if self.is_cube_done(obs, cube_name) else "not_done"
+            reachable_by = [
+                agent_name
+                for agent_name in self.robots.keys()
+                if self.can_agent_reach_cube(obs, agent_name, cube_name)
+            ]
+            lines.append(
+                f"- {cube_name}: current={current_panel}, target={target_panel}, "
+                f"status={status}, reachable_by={reachable_by or ['none']}"
+            )
+        return "\n".join(lines) + "\n"
+
+    def is_cube_done(self, obs: EnvState, cube_name: str) -> bool:
+        correct_panel = self.cube_to_bin[cube_name]
+        cube_state = obs.objects[cube_name]
+        bin_pos = self.bin_slot_pos[f"{correct_panel}_middle"]
+        return (
+            np.linalg.norm(bin_pos[:2] - cube_state.xpos[:2]) <= self.align_threshold
+            or correct_panel in cube_state.contacts
+        )
+
+    def can_agent_reach_cube(self, obs: EnvState, agent_name: str, cube_name: str) -> bool:
+        robot_name = self.robot_name_map_inv[agent_name]
+        cube_state = obs.objects[cube_name]
+        top_site = cube_state.sites[f"{cube_name}_top"]
+        return self.check_reach_range(robot_name, top_site.xpos)
+
+    def can_agent_place_panel(self, agent_name: str, panel_name: str) -> bool:
+        target_pos = self.get_target_pos(agent_name, panel_name)
+        if target_pos is None:
+            return False
+        robot_name = self.robot_name_map_inv[agent_name]
+        return self.check_reach_range(robot_name, target_pos)
+
+    def _sort_route_targets(self, obs: EnvState, agent_name: str, cube_name: str) -> List[str]:
+        """Directed handoff policy for sorting.
+
+        The old free-form prompt allowed moving objects back to arbitrary shared
+        panels.  That can create states where no robot can pick the object
+        again.  These route targets only move cubes toward their fixed goals:
+        Alice <-> Bob handoff is panel3, Bob <-> Chad handoff is panel5.
+        """
+        if self.is_cube_done(obs, cube_name):
+            return []
+
+        if cube_name == "blue_square":
+            # Final owner is Alice. From the right, move left through panel5 -> panel3 -> panel2.
+            route = {
+                "Alice": ["panel2"],
+                "Bob": ["panel3"],
+                "Chad": ["panel5"],
+            }
+        elif cube_name == "pink_polygon":
+            # Final owner is Bob. Use panel3 or panel5 only as directed handoff panels.
+            route = {
+                "Alice": ["panel3"],
+                "Bob": ["panel4"],
+                "Chad": ["panel5"],
+            }
+        elif cube_name == "yellow_trapezoid":
+            # Final owner is Chad. Prefer Bob->panel5; Alice->panel3 is last resort only.
+            bob_or_chad_can_pick = any(
+                self.can_agent_reach_cube(obs, helper, cube_name)
+                for helper in ["Bob", "Chad"]
+            )
+            route = {
+                "Alice": [] if bob_or_chad_can_pick else ["panel3"],
+                "Bob": ["panel5"],
+                "Chad": ["panel6"],
+            }
+        else:
+            route = {}
+        return route.get(agent_name, [])
+
+    def get_legal_actions(self, obs: EnvState) -> Dict[str, List[str]]:
+        """Return executable high-level action candidates for the current sort state.
+
+        The centralized LLM planner should choose from this list instead of
+        inventing free-form actions.  Candidates are intentionally conservative:
+        completed cubes are not moved, and each cube follows a directed handoff
+        route toward its fixed target panel.
+        """
+        legal_actions = {agent_name: ["WAIT"] for agent_name in self.robots.keys()}
+        for agent_name in self.robots.keys():
+            for cube_name in self.cube_names:
+                if not self.can_agent_reach_cube(obs, agent_name, cube_name):
+                    continue
+                current_panel = self.get_cube_panel(obs, cube_name)
+                for panel_name in self._sort_route_targets(obs, agent_name, cube_name):
+                    if panel_name == current_panel:
+                        continue
+                    if not self.can_agent_place_panel(agent_name, panel_name):
+                        continue
+                    legal_actions[agent_name].append(f"PICK {cube_name} PLACE {panel_name}")
+        return legal_actions
+
+    def get_recommended_plan(self, obs: EnvState) -> Dict[str, str]:
+        """Greedy safe plan used as a strong hint and fallback for plan mode."""
+        legal_actions = self.get_legal_actions(obs)
+        plan = {agent_name: "WAIT" for agent_name in self.robots.keys()}
+        used_agents = set()
+        used_cubes = set()
+        used_targets = set()
+
+        def action_score(agent_name: str, action: str) -> Tuple[int, int]:
+            if action == "WAIT":
+                return (0, 0)
+            cube_name = action.split("PICK", 1)[1].split("PLACE", 1)[0].strip()
+            target_panel = action.split("PLACE", 1)[1].strip()
+            final_panel = self.cube_to_bin[cube_name]
+            final_bonus = 100 if target_panel == final_panel else 50
+            # Prefer resolving right-side final object before moving unrelated handoffs.
+            priority = {
+                "yellow_trapezoid": 3,
+                "blue_square": 2,
+                "pink_polygon": 1,
+            }.get(cube_name, 0)
+            return (final_bonus, priority)
+
+        candidates = []
+        for agent_name, actions in legal_actions.items():
+            for action in actions:
+                if action == "WAIT":
+                    continue
+                cube_name = action.split("PICK", 1)[1].split("PLACE", 1)[0].strip()
+                candidates.append((action_score(agent_name, action), agent_name, cube_name, action))
+
+        # The sort task is short enough to solve sequentially, and observed
+        # failures came from adjacent robots (Bob/Chad) reaching into the
+        # shared workspace at the same time.  Recommend one active robot per
+        # step; the legal-action validator still allows parallel LLM proposals,
+        # but the default/fallback plan favors reliability.
+        max_parallel_actions = 1
+        for _, agent_name, cube_name, action in sorted(candidates, reverse=True):
+            target_panel = action.split("PLACE", 1)[1].strip()
+            if agent_name in used_agents or cube_name in used_cubes or target_panel in used_targets:
+                continue
+            plan[agent_name] = action
+            used_agents.add(agent_name)
+            used_cubes.add(cube_name)
+            used_targets.add(target_panel)
+            if len(used_agents) >= max_parallel_actions:
+                break
+        return plan
+
+    def format_legal_actions_prompt(self, obs: EnvState) -> str:
+        legal_actions = self.get_legal_actions(obs)
+        recommended = self.get_recommended_plan(obs)
+        lines = [
+            "[Legal Actions]",
+            "You must choose exactly one listed action for each robot. Do not invent actions.",
+        ]
+        for agent_name, actions in legal_actions.items():
+            lines.append(f"{agent_name}:")
+            for action in actions:
+                prefix = " (recommended)" if recommended.get(agent_name) == action else ""
+                lines.append(f"- {action}{prefix}")
+        lines.append("[Recommended Plan]")
+        lines.append("EXECUTE")
+        for agent_name in self.robots.keys():
+            lines.append(f"NAME {agent_name} ACTION {recommended[agent_name]}")
+        return "\n".join(lines) + "\n"
+
     def get_robot_name(self, agent_name):
         return self.robot_name_map_inv[agent_name]
     
@@ -448,19 +616,19 @@ In the plan, at least one robot should be acting, you can't all WAIT.
                 return None  
 
             if target_name == 'panel3':
-                if 'panda' in robot_name:
-                    ret[0] -= 0.12
-                    ret[1] -= 0.1
-                else:
-                    ret[0] += 0.12
-                    ret[1] += 0.1
+                # panel3 is the Alice<->Bob handoff panel.  The original
+                # agent-dependent offset lets Alice place on the far side of
+                # panel3; in observed rollouts Bob then passed reach checks but
+                # failed IK when trying to pick the object.  Use a single shared
+                # handoff point that Bob can pick and Alice can also reach.
+                ret[0] -= 0.12
+                ret[1] -= 0.1
             if target_name == 'panel5':
-                if 'panda' in robot_name:
-                    ret[0] += 0.12
-                    ret[1] -= 0.1 
-                else:
-                    ret[0] -= 0.12
-                    ret[1] += 0.1
+                # panel5 is the Bob<->Chad handoff panel.  Use Bob's original
+                # placement side as the shared handoff point; it was observed
+                # to be pickable by Chad and remains placeable by Bob.
+                ret[0] += 0.12
+                ret[1] -= 0.1
 
             ret[2] = 0.5
         elif target_name in self.cube_names:
@@ -554,5 +722,3 @@ if __name__ == "__main__":
     print(env.get_agent_prompt(obs, "Alice"))
     breakpoint()
     img=env.physics.render(camera_id="teaser", height=480, width=600)
-
-
