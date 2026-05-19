@@ -42,3 +42,7 @@ env/
 
 # Duplicate extracted PDF images; keep qz/image/ if the readable markdown uses it.
 /qz/images/
+
+# models
+ollama_models
+models
