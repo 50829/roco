@@ -62,8 +62,9 @@ Important Sort-specific rules:
 - Alice/Bob handoff uses panel3.
 - Bob/Chad handoff uses panel5.
 - A valid intermediate handoff is better than an invalid direct final placement.
+- For reliability, use exactly one non-WAIT action per round; all other robots must WAIT.
 - Prefer [Recommended Plan] unless feedback says it failed.
-- To reduce collision risk, use WAIT for robots that do not need to move.
+- To reduce collision risk, use WAIT for robots that do not need to move. Never make two robots move in the same round.
 
 At each round, output exactly one ACTION per robot and strictly follow [Action Output Instruction].
 Your final plan output is:
@@ -274,6 +275,54 @@ In the plan, at least one robot should be acting, you can't all WAIT.
         robot_name = self.robot_name_map_inv[agent_name]
         return self.check_reach_range(robot_name, target_pos)
 
+    def get_allowed_action_names(self) -> Set[str]:
+        return {"PICK", "WAIT"}
+
+    def get_max_parallel_actions(self, obs: Optional[EnvState] = None) -> int:
+        """Sort handoffs are most reliable when only one robot moves per round.
+
+        Earlier rollouts allowed multiple legal actions in parallel.  Although
+        those actions were semantically valid, adjacent robots often collided or
+        made RRT fail around the shared handoff panels (panel3/panel5).  Expose
+        this task-level limit so the generic plan prompter can reject unsafe
+        multi-action LLM outputs before parsing/RRT.
+        """
+        return 1
+
+    def verify_plan_semantics(self, obs: EnvState, actions: Dict[str, str]) -> Tuple[bool, str]:
+        """Task-specific verification hook used by the generic plan verifier."""
+        if set(actions.keys()) != set(self.robots.keys()):
+            return False, f"Expected actions for {list(self.robots.keys())}, got {list(actions.keys())}"
+
+        all_done = all(self.is_cube_done(obs, cube_name) for cube_name in self.cube_names)
+        active = [(agent, action) for agent, action in actions.items() if action != "WAIT"]
+        if not all_done and len(active) == 0:
+            return False, "All robots WAIT while cubes remain unsorted."
+        if len(active) > self.get_max_parallel_actions(obs):
+            return False, "Sort allows only one non-WAIT action per round."
+
+        legal_actions = self.get_legal_actions(obs)
+        for agent_name, action in actions.items():
+            if action not in legal_actions.get(agent_name, []):
+                return False, f"{agent_name} action '{action}' is not in current legal actions."
+            if action == "WAIT":
+                continue
+            if "PICK" not in action or "PLACE" not in action:
+                return False, f"{agent_name} action must be PICK <cube> PLACE <panel> or WAIT."
+            cube_name = action.split("PICK", 1)[1].split("PLACE", 1)[0].strip()
+            target_panel = action.split("PLACE", 1)[1].strip()
+            if cube_name not in self.cube_names:
+                return False, f"Unknown cube {cube_name}."
+            if self.is_cube_done(obs, cube_name):
+                return False, f"{cube_name} is already done and should not be moved."
+            allowed_targets = self._sort_route_targets(obs, agent_name, cube_name)
+            if target_panel not in allowed_targets:
+                return False, (
+                    f"{agent_name} cannot move {cube_name} to {target_panel}; "
+                    f"directed route targets are {allowed_targets}."
+                )
+        return True, "OK"
+
     def _sort_route_targets(self, obs: EnvState, agent_name: str, cube_name: str) -> List[str]:
         """Directed handoff policy for sorting.
 
@@ -391,6 +440,7 @@ In the plan, at least one robot should be acting, you can't all WAIT.
         lines = [
             "[Legal Actions]",
             "You must choose exactly one listed action for each robot. Do not invent actions.",
+            f"For this task, choose at most {self.get_max_parallel_actions(obs)} non-WAIT action per round; all other robots must WAIT.",
         ]
         for agent_name, actions in legal_actions.items():
             lines.append(f"{agent_name}:")

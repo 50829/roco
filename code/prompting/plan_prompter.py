@@ -169,12 +169,24 @@ class SingleThreadPrompter:
 
     def _validate_against_legal_actions(
         self,
+        obs: EnvState,
         response: str,
         legal_actions: Dict[str, List[str]],
         forbidden_actions: Dict[str, set],
     ) -> Tuple[bool, str]:
-        if not legal_actions:
-            return True, "No legal action list provided by env."
+        """Generic verification layer before parser/RRT.
+
+        This layer is intentionally task-agnostic where possible, and then
+        delegates stronger task-specific checks to optional env hooks:
+        - get_allowed_action_names()
+        - get_max_parallel_actions(obs)
+        - verify_plan_semantics(obs, actions)
+
+        If an env also exposes get_legal_actions(obs), actions must be exact
+        members of that list.  Envs without legal-action lists still benefit
+        from format/action-name/max-parallel/duplicate/forbidden checks plus
+        their task-specific hook.
+        """
         actions = self._extract_action_lines(response)
         expected_agents = list(self.robot_agent_names)
         missing = [agent for agent in expected_agents if agent not in actions]
@@ -182,28 +194,71 @@ class SingleThreadPrompter:
         if missing or extra:
             return False, f"Plan must contain exactly one action for each robot. missing={missing}, extra={extra}"
 
+        allowed_action_names = None
+        if hasattr(self.env, "get_allowed_action_names"):
+            allowed_action_names = set(self.env.get_allowed_action_names())
+
         picked_objects = []
         placed_targets = []
+        active_actions = []
         for agent_name, action in actions.items():
-            legal_for_agent = legal_actions.get(agent_name, [])
-            if action not in legal_for_agent:
+            first_token = action.split()[0] if action.split() else ""
+            if allowed_action_names is not None and first_token not in allowed_action_names:
+                return False, (
+                    f"Invalid action name for {agent_name}: '{first_token}'. "
+                    f"Allowed action names: {sorted(allowed_action_names)}"
+                )
+
+            legal_for_agent = legal_actions.get(agent_name, []) if legal_actions else []
+            if legal_actions and action not in legal_for_agent:
                 return False, (
                     f"Illegal action for {agent_name}: '{action}'. "
                     f"Choose one of: {legal_for_agent}"
                 )
             if action in forbidden_actions.get(agent_name, set()):
                 return False, f"Action for {agent_name} repeats a failed action this round: '{action}'"
+            if action != "WAIT":
+                active_actions.append((agent_name, action))
             if "PICK" in action and "PLACE" in action:
                 obj = action.split("PICK", 1)[1].split("PLACE", 1)[0].strip()
                 target = action.split("PLACE", 1)[1].strip()
                 picked_objects.append(obj)
                 placed_targets.append(target)
+            elif action.startswith("PICK "):
+                obj = action.split("PICK", 1)[1].split("PATH", 1)[0].strip().split()
+                if obj:
+                    picked_objects.append(obj[0])
+            elif action.startswith("PLACE "):
+                parts = action.split("PLACE", 1)[1].split("PATH", 1)[0].strip().split()
+                if len(parts) >= 2:
+                    placed_targets.append(parts[1])
+            elif action.startswith("PUT "):
+                parts = action.split("PUT", 1)[1].split("PATH", 1)[0].strip().split()
+                if len(parts) >= 2:
+                    placed_targets.append(parts[1])
+        max_parallel_actions = None
+        if hasattr(self.env, "get_max_parallel_actions"):
+            try:
+                max_parallel_actions = self.env.get_max_parallel_actions(obs)
+            except TypeError:
+                max_parallel_actions = self.env.get_max_parallel_actions()
+        if max_parallel_actions is not None and len(active_actions) > max_parallel_actions:
+            return False, (
+                f"Too many non-WAIT actions: {len(active_actions)}. "
+                f"This task allows at most {max_parallel_actions} non-WAIT action(s) per round. "
+                f"Active actions: {active_actions}. Use WAIT for the other robots."
+            )
         duplicate_objects = sorted({obj for obj in picked_objects if picked_objects.count(obj) > 1})
         if duplicate_objects:
             return False, f"Multiple robots cannot PICK the same object in one round: {duplicate_objects}"
         duplicate_targets = sorted({target for target in placed_targets if placed_targets.count(target) > 1})
         if duplicate_targets:
             return False, f"Multiple robots should not PLACE into the same target in one round: {duplicate_targets}"
+
+        if hasattr(self.env, "verify_plan_semantics"):
+            valid, reason = self.env.verify_plan_semantics(obs, actions)
+            if not valid:
+                return False, f"Task semantic verification failed: {reason}"
         return True, "OK"
 
     def _extract_agents_from_text(self, text: str) -> List[str]:
@@ -290,6 +345,7 @@ class SingleThreadPrompter:
                 return
             seen.add(response)
             valid, _ = self._validate_against_legal_actions(
+                obs,
                 response,
                 legal_actions,
                 forbidden_actions,
@@ -339,6 +395,11 @@ class SingleThreadPrompter:
 
         from itertools import combinations
         max_parallel_actions = min(2, len(self.robot_agent_names))
+        if hasattr(self.env, "get_max_parallel_actions"):
+            try:
+                max_parallel_actions = min(max_parallel_actions, self.env.get_max_parallel_actions(obs))
+            except TypeError:
+                max_parallel_actions = min(max_parallel_actions, self.env.get_max_parallel_actions())
         for size in range(max_parallel_actions, 0, -1):
             for combo in combinations(atomic_candidates, size):
                 if not compatible(combo):
@@ -439,6 +500,7 @@ class SingleThreadPrompter:
 
             curr_feedback = "None"
             valid_legal, legal_reason = self._validate_against_legal_actions(
+                obs,
                 response,
                 legal_actions,
                 forbidden_actions,
@@ -451,11 +513,16 @@ Previous response:
 Choose exactly one action per robot from [Legal Actions]. Do not invent actions.
                 """
                 failed_agents = self._extract_agents_from_text(legal_reason)
-                self._ban_actions_from_response(
-                    response,
-                    forbidden_actions,
-                    agents=(failed_agents or None),
-                )
+                # A max-parallelism violation means the combination is unsafe,
+                # not that any individual action is bad.  Do not ban the
+                # single actions; fallback/replan can then try one of them with
+                # other robots WAITing.
+                if "Too many non-WAIT actions" not in legal_reason:
+                    self._ban_actions_from_response(
+                        response,
+                        forbidden_actions,
+                        agents=(failed_agents or None),
+                    )
                 ready_to_execute = False
                 parse_succ = False
                 llm_plans = []

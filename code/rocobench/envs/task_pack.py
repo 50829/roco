@@ -577,6 +577,79 @@ class PackGroceryTask(MujocoSimEnv):
         ]
         return "\n".join(lines) + "\n"
 
+    def get_allowed_action_names(self) -> Set[str]:
+        return {"PICK", "PLACE", "WAIT"}
+
+    def get_max_parallel_actions(self, obs: Optional[EnvState] = None) -> int:
+        if obs is None:
+            return 2
+        holding = {
+            agent: self._agent_holding_item(obs, agent)
+            for agent in ["Alice", "Bob"]
+        }
+        # Parallel PICK can be safe when both are empty, but PLACE is serialized.
+        return 2 if all(item is None for item in holding.values()) else 1
+
+    def verify_plan_semantics(self, obs: EnvState, actions: Dict[str, str]) -> Tuple[bool, str]:
+        if set(actions.keys()) != {"Alice", "Bob"}:
+            return False, f"Expected Alice/Bob actions, got {list(actions.keys())}"
+
+        holding = {
+            agent: self._agent_holding_item(obs, agent)
+            for agent in ["Alice", "Bob"]
+        }
+        unpacked = [item for item in self.item_names if not self._is_item_packed(obs, item)]
+        occupied = self._occupied_slots(obs)
+        active = [(agent, action) for agent, action in actions.items() if action != "WAIT"]
+
+        if len(unpacked) > 0 and len(active) == 0:
+            return False, "All robots WAIT while unpacked items remain."
+        if len(active) > self.get_max_parallel_actions(obs):
+            return False, "Too many active Pack actions for the current holding state."
+
+        num_place = sum(action.startswith("PLACE ") for action in actions.values())
+        num_pick = sum(action.startswith("PICK ") for action in actions.values())
+        if num_place > 1:
+            return False, "At most one robot may PLACE per round."
+        if num_place > 0 and num_pick > 0:
+            return False, "Do not mix PLACE and PICK in one Pack round."
+
+        for agent_name, action in actions.items():
+            held = holding[agent_name]
+            if action == "WAIT":
+                continue
+            if action.startswith("PICK "):
+                if held is not None:
+                    return False, f"{agent_name} already holds {held} and cannot PICK."
+                item = action.split("PICK", 1)[1].split("PATH", 1)[0].strip().split()[0]
+                if item not in self.item_names:
+                    return False, f"Unknown pack item {item}."
+                if self._is_item_packed(obs, item):
+                    return False, f"{item} is already packed."
+            elif action.startswith("PLACE "):
+                if held is None:
+                    return False, f"{agent_name} is empty-handed and cannot PLACE."
+                parts = action.split("PLACE", 1)[1].split("PATH", 1)[0].strip().split()
+                if len(parts) < 2:
+                    return False, f"{agent_name} PLACE must be PLACE <obj> <bin_slot> PATH <path>."
+                item, slot = parts[0], parts[1]
+                if item != held:
+                    return False, f"{agent_name} holds {held}, but tried to PLACE {item}."
+                if slot not in PACK_BIN_SITE_NAMES:
+                    return False, f"{slot} is not an explicit valid bin slot."
+                if slot in occupied:
+                    return False, f"{slot} is already occupied."
+            else:
+                return False, f"Unsupported Pack action: {action}"
+
+        if any(item is not None for item in holding.values()):
+            place_agents = [agent for agent, action in actions.items() if action.startswith("PLACE ")]
+            if len(place_agents) != 1:
+                return False, "When any robot is holding an item, exactly one holding robot should PLACE and the other should WAIT/retreat."
+            if holding[place_agents[0]] is None:
+                return False, f"{place_agents[0]} was selected to PLACE but is empty-handed."
+        return True, "OK"
+
     def central_plan_prompt(self, chat_history: List[str] = []):
         return PACK_PLAN_PROMPT 
 

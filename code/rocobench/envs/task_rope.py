@@ -277,6 +277,57 @@ class MoveRopeTask(MujocoSimEnv):
         ]
         return "\n".join(lines) + "\n"
 
+    def get_allowed_action_names(self) -> Set[str]:
+        return {"PICK", "PUT", "WAIT"}
+
+    def get_max_parallel_actions(self, obs: Optional[EnvState] = None) -> int:
+        # Rope requires coordinated two-arm PICK/PUT stages.
+        return 2
+
+    def verify_plan_semantics(self, obs: EnvState, actions: Dict[str, str]) -> Tuple[bool, str]:
+        if set(actions.keys()) != {"Alice", "Bob"}:
+            return False, f"Expected Alice/Bob actions, got {list(actions.keys())}"
+
+        for agent_name, action in actions.items():
+            if any(bad in action for bad in ["LIFT", "PLACE", "MOVE", "LOWER", "RAISE", "DROP"]):
+                return False, f"{agent_name} used forbidden rope action in '{action}'."
+            if "PATH" not in action:
+                return False, f"{agent_name} action must include PATH."
+
+        holding = {
+            agent_name: self._agent_holding_rope(obs, agent_name)
+            for agent_name in ["Alice", "Bob"]
+        }
+        num_holding = sum(v is not None for v in holding.values())
+        has_pick = any(action.startswith("PICK ") for action in actions.values())
+        has_put = any(action.startswith("PUT ") for action in actions.values())
+
+        if has_pick and has_put:
+            return False, "Do not mix PICK and PUT in the same rope round."
+
+        if num_holding == 0:
+            if not (
+                actions["Alice"].startswith("PICK rope_front_end")
+                and actions["Bob"].startswith("PICK rope_back_end")
+            ):
+                return False, "When both robots are empty, Alice must PICK rope_front_end and Bob must PICK rope_back_end."
+        elif num_holding == 1:
+            holder = [agent for agent, held in holding.items() if held is not None][0]
+            empty = "Bob" if holder == "Alice" else "Alice"
+            if not actions[holder].startswith("WAIT"):
+                return False, f"{holder} already holds {holding[holder]} and must WAIT until both ends are held."
+            expected_pick = "rope_back_end" if empty == "Bob" else "rope_front_end"
+            if not actions[empty].startswith(f"PICK {expected_pick}"):
+                return False, f"{empty} must PICK {expected_pick} before any PUT."
+        else:
+            if not all(action.startswith("PUT ") for action in actions.values()):
+                return False, "When both robots hold rope ends, both should PUT in the same round."
+            for agent_name, held_end in holding.items():
+                if held_end and not actions[agent_name].startswith(f"PUT {held_end}"):
+                    return False, f"{agent_name} holds {held_end} but tried '{actions[agent_name]}'."
+
+        return True, "OK"
+
     def get_graspable_objects(self):
         graspables = [
             # "rope_front_end",
