@@ -261,12 +261,24 @@ class LLMResponseParser:
             path_pts = self.parse_path(action_desp)
             if path_pts is None:
                 return False, f"Action WAIT {action_desp} does not fit desired format.", []
+            wait_target_pose = current_pose
+            # In PackGroceryTask, WAIT is also used as a safe retreat while the
+            # robot keeps its current in-hand object.  The old implementation
+            # always forced the final target to the current pose, so a WAIT
+            # path could only make a detour and then return to the blocking
+            # pose.  For Pack only, allow the last PATH coordinate to be the
+            # final waiting/parking position; tasks that use four copies of the
+            # current position are unchanged.
+            if 'PackGroceryTask' in str(self.env) and len(path_pts) > 0:
+                wait_target_pose = current_pose.copy()
+                wait_target_pose[:3] = path_pts[-1]
             waypoints = self.add_planned_waypoints(
                 ee_start=current_pose,
                 path_pts=path_pts,
-                ee_target=current_pose,
+                ee_target=wait_target_pose,
             )
         else:
+            wait_target_pose = current_pose
             waypoints = self.add_direct_waypoints(
             ee_start=current_pose,
             ee_target=current_pose,
@@ -277,7 +289,7 @@ class LLMResponseParser:
 
         return True, "", [dict(
             robot_name=agent_name,
-            ee_targets=current_pose,
+            ee_targets=wait_target_pose,
             ee_waypoints=waypoints,
             tograsp=None,
             inhand=inhand,
