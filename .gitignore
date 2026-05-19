@@ -1,0 +1,44 @@
+# Runtime/evaluation outputs
+/data/
+/output/
+/code/data/
+/code/output/
+/code_v1_0/data/
+/code_v1_0/output/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and generated run artifacts
+*.log
+*.pkl
+*.mp4
+*.avi
+*.mov
+*.html
+
+# Local packaging/archives generated during experiments
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Temporary/local notes or generated doc assets
+.docs/assets/
+
+# Duplicate extracted PDF images; keep qz/image/ if the readable markdown uses it.
+/qz/images/

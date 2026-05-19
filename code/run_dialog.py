@@ -30,7 +30,7 @@ TASK_NAME_MAP = {
     "pack": PackGroceryTask,
 }
 
-DEFAULT_SHARED_RUN_DIR = "/inspire/qb-ilm2/project/26summer-camp-09/public/inspire_shared/mount/26220478/rocobench_runs/data"
+DEFAULT_PROJECT_DATA_DIR = "/inspire/qb-ilm2/project/26summer-camp-09/26220478/data"
 
 class LLMRunner:
     def __init__(
@@ -407,6 +407,8 @@ class LLMRunner:
 
 def main(args):
     assert args.task in TASK_NAME_MAP.keys(), f"Task {args.task} not supported"
+    if args.run_name is None:
+        args.run_name = args.task
     env_cl = TASK_NAME_MAP[args.task]
     if args.task == 'rope':
         args.output_mode = 'action_and_path'
@@ -496,13 +498,13 @@ if __name__ == "__main__":
         "--data_dir",
         "-d",
         type=str,
-        default=os.environ.get("ROCO_DATA_DIR", DEFAULT_SHARED_RUN_DIR),
-        help=f"Directory for run artifacts. Defaults to ROCO_DATA_DIR or {DEFAULT_SHARED_RUN_DIR}.",
+        default=os.environ.get("ROCO_DATA_DIR", DEFAULT_PROJECT_DATA_DIR),
+        help=f"Directory for run artifacts. Defaults to ROCO_DATA_DIR or {DEFAULT_PROJECT_DATA_DIR}.",
     )
     parser.add_argument("--temperature", "-temp", type=float, default=0)
     parser.add_argument("--start_id", "-sid", type=int, default=-1)
     parser.add_argument("--num_runs", '-nruns', type=int, default=1)
-    parser.add_argument("--run_name", "-rn", type=str, default="cabinet")
+    parser.add_argument("--run_name", "-rn", type=str, default=None)
     parser.add_argument("--tsteps", "-t", type=int, default=10)
     parser.add_argument("--task", type=str, default="cabinet")
     parser.add_argument("--output_mode", type=str, default="action_only", choices=["action_only", "action_and_path"])

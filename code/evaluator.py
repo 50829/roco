@@ -213,7 +213,7 @@ if __name__ == "__main__":
         # Use default timeout (from DEFAULT_RUN_TIMEOUTS)
         output_root = os.environ.get(
             "ROCO_EVAL_OUTPUT_DIR",
-            "/inspire/qb-ilm2/project/26summer-camp-09/public/inspire_shared/mount/26220478/rocobench_runs/output",
+            "/inspire/qb-ilm2/project/26summer-camp-09/26220478/data",
         )
         results.append(test_run_dialog("sort", 5, output_root))
         results.append(test_run_dialog("cabinet", 5, output_root))

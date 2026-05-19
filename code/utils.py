@@ -11,7 +11,7 @@ from datetime import datetime
 
 DEFAULT_LOG_ROOT = os.environ.get(
     "ROCO_EVAL_OUTPUT_DIR",
-    "/inspire/qb-ilm2/project/26summer-camp-09/public/inspire_shared/mount/26220478/rocobench_runs/output",
+    "/inspire/qb-ilm2/project/26summer-camp-09/26220478/data",
 )
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 _ACTIVE_LOG_FILE = None

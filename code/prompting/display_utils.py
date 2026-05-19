@@ -254,14 +254,18 @@ def save_episode_html(
         # relative_step_dir = step_dir.split("/")[-1]
         relative_step_dir = os.path.split(step_dir)[-1]
         if video_include_steps:
-            video_fname = f"video_step_{step}.m4v"
+            video_fname_cur = f"video_step_{step}.m4v"
         else:
             # video_fname = f"{relative_step_dir}/{video_fname}"
             video_fname_cur = os.path.join(relative_step_dir, video_fname).replace("\\", "/")
+        video_path_cur = os.path.join(episode_path, video_fname_cur)
+        include_video = os.path.exists(video_path_cur)
+        if include_video:
             print(video_fname_cur)
         all_html_blocks.append(
             compose_html_block(
                 container_name=f"chat-container-{step}",
+                include_video=include_video,
                 video_fname=video_fname_cur,
             )
         )
