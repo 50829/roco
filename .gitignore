@@ -39,6 +39,7 @@ env/
 
 # Temporary/local notes or generated doc assets
 .docs/assets/
+.docs/sdd/report/个人报告,md
 
 # Duplicate extracted PDF images; keep qz/image/ if the readable markdown uses it.
 /qz/images/
