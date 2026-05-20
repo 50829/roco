@@ -568,3 +568,66 @@ Chad: WAIT
 最后 Alice 把 blue_square 放到 panel2。
 
 这样牺牲一点并行速度，但明显提高稳定性。
+
+# 结论
+## 安全并行（Safe Parallel）
+问题背景
+Sort 任务最简单的方案是串行：每轮只动一个机器人，成功率 100% 但平均要 6.1 步。
+
+想提速，就要允许多个机器人同时动——但随意并行会出问题：Bob 和 Chad 同时进入 panel3/panel5 共享区域，两条机械臂物理碰撞。
+
+安全并行的核心规则
+不是"任意两个机器人可以同时动"，而是有约束的并行：
+
+
+- 每轮最多 2 个 active action
+- Bob 是中间机器人，永远串行，不能和任何人并行
+- 只有 Alice + Chad 可以同时动
+- 同时动时，两者的 panel footprint 不能重叠
+- 两者不能都触及共享 handoff panel（panel3 或 panel5）
+- 不能移动同一个 cube，不能放到同一个 target
+footprint 是什么：粗略估计一个动作会经过哪些格子。比如：
+
+Alice PICK blue_square（在 panel1）PLACE panel3 → footprint = {1, 2, 3}
+Chad PICK yellow_trapezoid（在 panel7）PLACE panel6 → footprint = {6, 7}
+两者不重叠，可以并行。
+
+代码里体现在 task_sort.py:307-354 的 _sort_action_footprint() 和 _sort_parallel_compatible()。
+
+## Recovery 机制
+问题背景
+允许并行之后，新的问题出现了：
+
+一个动作 IK 失败 → 旧逻辑把整轮所有动作都 ban 掉 → Alice/Chad 可行的动作也被禁 → 卡死
+Bob holding 了物体 → 系统还推荐 Bob 去 PICK 新物体 → parser 报错 → 反复失败
+一个物体虽然在 handoff panel 但位置不好 → 接收机器人每次 IK 失败 → 无限循环
+Recovery 是一套兜底策略，分几层：
+
+第一层：精确 ban（Targeted Ban）
+
+从环境反馈文本里识别到底是哪个机器人失败了（IK failed: on Bob / Out of reach: Alice），只 ban 那个机器人的当前动作，不连累其他人。
+
+碰撞例外：Collision detected 说明是"这两个组合"不安全，不代表单个动作错，所以碰撞时不 ban 任何单个动作，只提示减少并行数。
+
+第二层：确定性 Fallback
+
+LLM 多次 replan 都失败后，不再问 LLM，直接程序化地枚举可行子集：
+
+
+先试 推荐计划的双机器人版本
+→ 再试 推荐计划的单机器人版本（Alice only / Chad only）
+→ 再枚举其他 legal actions 的单/双组合
+这保证了"Bob IK 失败"不会让整轮什么都不执行，Alice/Chad 的可行动作照样推进。
+
+第三层（roco 实验版，roco2 简化掉了）：
+
+PLACE-only recovery：检测到 holding 状态时，生成 PLACE 动作而不是 PICK
+same-panel reposition：物体在 handoff panel 但位置不利时，允许在原格子内重新放置到标准 handoff 点
+两者的关系
+
+安全并行 → 让系统更快（4.43步 vs 6.1步）
+Recovery  → 让系统更稳（把并行引入的新失败兜住）
+
+两者组合 = safe parallel recovery
+结果：90% 成功率，平均 5.0 步
+安全并行是进攻，Recovery 是防守。单有并行成功率掉到 70%，加上 Recovery 拉回到 90%。
