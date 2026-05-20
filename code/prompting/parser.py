@@ -329,6 +329,14 @@ class LLMResponseParser:
 
             pick_pos = obj_state.sites[site_name].xpos
             pick_quat = obj_state.sites[site_name].xquat 
+            if 'SortOneBlockTask' in str(self.env):
+                # Sort cubes can have arbitrary yaw after random sampling and
+                # after handoff.  Requiring the gripper to match the cube-top
+                # site quaternion makes otherwise valid panel handoffs fail IK
+                # (observed for Bob picking from panel3 and Chad from panel5).
+                # Keep the current end-effector orientation for top-down
+                # pick/place; the object is still attached through `tograsp`.
+                pick_quat = robot_state.ee_xquat.copy()
 
         tograsp = (obj_name, site_name, 1) 
         
