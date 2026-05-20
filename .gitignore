@@ -34,7 +34,7 @@ env/
 # Local packaging/archives generated during experiments
 *.zip
 *.tar
-*.tar.gz
+
 *.tgz
 
 # Temporary/local notes or generated doc assets
@@ -47,3 +47,5 @@ env/
 # models
 ollama_models
 models
+data_*.tar.gz
+data/
